@@ -1,0 +1,41 @@
+# Reference deployment for `@felipefontoura/paperclip-skills-bridge` running
+# in the same docker network as the Hermes Agent container, talking to a
+# Paperclip instance reachable by URL.
+
+services:
+  paperclip-skills-bridge:
+    # Pin the version explicitly. Use `:latest` only when you intentionally
+    # want unattended upgrades and you trust the upstream tag.
+    image: ${BRIDGE_IMAGE:-ghcr.io/felipefontoura/paperclip-skills-bridge:0.1.0}
+    restart: unless-stopped
+    environment:
+      # Reach your Paperclip instance — same network or public URL.
+      PAPERCLIP_URL: ${PAPERCLIP_URL}
+      PAPERCLIP_COMPANY_ID: ${PAPERCLIP_COMPANY_ID}
+      # Recommended path: machine bearer obtained via Paperclip's access-claim
+      # flow. Session cookie support exists for development only — see README.
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
+      PAPERCLIP_SESSION_COOKIE: ${PAPERCLIP_SESSION_COOKIE:-}
+      # Mandatory once the bridge port is reachable from anything other than
+      # an isolated docker network. Leave empty for local development only.
+      BRIDGE_AUTH_TOKEN: ${BRIDGE_AUTH_TOKEN:-}
+      BRIDGE_PORT: "8080"
+      BRIDGE_HOST: "0.0.0.0"
+      PAPERCLIP_FETCH_TIMEOUT_MS: ${PAPERCLIP_FETCH_TIMEOUT_MS:-5000}
+    # Bridge serves on :8080 — keep it on the internal docker network only.
+    # The Hermes container can curl http://paperclip-skills-bridge:8080/...
+    networks: [hermes-net]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  hermes-net:
+    driver: bridge
