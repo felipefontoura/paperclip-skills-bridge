@@ -11,7 +11,6 @@ on:
 
 permissions:
   contents: write   # gh release create
-  id-token: write   # npm publish --provenance
   packages: write   # ghcr.io push
 
 concurrency:
@@ -19,24 +18,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish-npm:
-    name: build + publish npm
+  publish-image:
+    name: build + push docker image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Resolve version
         id: version
@@ -46,13 +35,21 @@ jobs:
           echo "tag=$REF" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Install
-        run: pnpm install --frozen-lockfile --config.verify-deps-before-run=false --config.dangerouslyAllowAllBuilds=true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
 
-      - name: Typecheck + build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install + build (for the tarball artifact in the GitHub Release)
         run: |
+          pnpm install --frozen-lockfile --config.verify-deps-before-run=false --config.dangerouslyAllowAllBuilds=true
           pnpm typecheck
           pnpm build
+          pnpm pack
 
       - name: Verify package.json version matches tag
         run: |
@@ -61,51 +58,6 @@ jobs:
             echo "package.json version ($PKG_VERSION) does not match tag (${{ steps.version.outputs.version }})" >&2
             exit 1
           fi
-
-      - name: Publish to npm
-        if: env.NPM_TOKEN != ''
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm publish --access public --no-git-checks --provenance
-
-      - name: Pack tarball (artifact)
-        run: pnpm pack
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          NOTES_FILE=$(mktemp)
-          awk -v v="${{ steps.version.outputs.version }}" '
-            $0 ~ "^## \\[" v "\\]" {flag=1; next}
-            flag && $0 ~ "^## \\[" {exit}
-            flag {print}
-          ' CHANGELOG.md > "$NOTES_FILE"
-          if [ ! -s "$NOTES_FILE" ]; then
-            echo "Release ${{ steps.version.outputs.tag }}" > "$NOTES_FILE"
-          fi
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "${{ steps.version.outputs.tag }}" \
-            --notes-file "$NOTES_FILE" \
-            *.tgz
-
-  publish-image:
-    name: build + push docker image
-    runs-on: ubuntu-latest
-    needs: publish-npm
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-          fetch-depth: 0
-
-      - name: Resolve version
-        id: version
-        run: |
-          REF="${{ inputs.tag || github.ref_name }}"
-          VERSION="${REF#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -126,7 +78,6 @@ jobs:
           IMAGE=ghcr.io/${{ github.repository_owner }}/paperclip-skills-bridge
           TAGS="$IMAGE:${{ steps.version.outputs.version }},$IMAGE:latest"
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Build + push
         uses: docker/build-push-action@v6
@@ -143,3 +94,29 @@ jobs:
             org.opencontainers.image.description=Stateless HTTP bridge translating Paperclip skills to .well-known/skills/ for Hermes Agent
           provenance: true
           sbom: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES_FILE=$(mktemp)
+          awk -v v="${{ steps.version.outputs.version }}" '
+            $0 ~ "^## \\[" v "\\]" {flag=1; next}
+            flag && $0 ~ "^## \\[" {exit}
+            flag {print}
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "Release ${{ steps.version.outputs.tag }}" > "$NOTES_FILE"
+          fi
+          {
+            echo ""
+            echo "### Docker image"
+            echo ""
+            echo "    ghcr.io/${{ github.repository_owner }}/paperclip-skills-bridge:${{ steps.version.outputs.version }}"
+            echo "    ghcr.io/${{ github.repository_owner }}/paperclip-skills-bridge:latest"
+          } >> "$NOTES_FILE"
+          gh release delete "${{ steps.version.outputs.tag }}" --yes 2>/dev/null || true
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file "$NOTES_FILE" \
+            *.tgz
